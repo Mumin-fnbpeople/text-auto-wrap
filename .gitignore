@@ -1,4 +1,5 @@
 .tooling/
+.worktrees/
 .dart_tool/
 pubspec.lock
 build/
