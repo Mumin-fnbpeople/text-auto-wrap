@@ -63,7 +63,7 @@ void main() {
   for (final width in [20.0, 60.0]) {
     for (final rich in [false, true]) {
       testWidgets(
-        'I1 run-end width=$width rich=$rich checks ranges when widths agree',
+        'I1 run-end width=$width rich=$rich retains painted whitespace',
         (tester) async {
           final recognizer = TapGestureRecognizer();
           addTearDown(recognizer.dispose);
@@ -100,44 +100,42 @@ void main() {
           );
           final render = wrapRender(tester);
           final result = render.result!;
-          // These already agree before the fix; geometry alone misses the defect.
           expect(_widths(render), result.widths);
-          expect(result.lineCount, _widths(render).length);
-          final effective = render.effectiveText.toPlainText(
-            includeSemanticsLabels: false,
-          );
-          final actualLines = effective.contains('\n')
-              ? effective.split('\n')
-              : width == 20
-              ? ['aa  ', 'bb']
-              : ['aa  bb'];
-          expect(result.lines, actualLines);
-          expect(
-            result.ranges.map((range) => (range.start, range.end)),
-            width == 20 ? [(0, 4), (4, 6)] : [(0, 6)],
-          );
-          expect(result.widths, width == 20 ? [20, 20] : [60]);
-          expect(result.applied, isFalse);
-          expect(result.reason, 'invalidRuntimeMeasurement');
-          expect(result.source, TextWrapSelectionSource.native);
+          expect(result.lineCount, 2);
+          expect(result.lines, ['aa  ', 'bb']);
+          expect(result.ranges.map((range) => (range.start, range.end)), [
+            (0, 4),
+            (4, 6),
+          ]);
+          expect(result.widths, [20, 20]);
+          expect(result.applied, width == 60);
+          expect(result.reason, 'calculatedSelected');
+          expect(result.source, TextWrapSelectionSource.calculated);
           expect(
             result.diagnostics!.selection.source,
-            TextWrapSelectionSource.native,
-          );
-          expect(
-            result.diagnostics!.selection.reason,
-            'invalidRuntimeMeasurement',
+            TextWrapSelectionSource.calculated,
           );
           expect(result.diagnostics!.calculatedLayouts.single.lines, [
             'aa',
             'bb',
           ]);
-          expect(render.effectiveText, same(render.sourceText));
+          final effective = render.effectiveText.toPlainText(
+            includeSemanticsLabels: false,
+          );
+          expect(effective, width == 20 ? 'aa  bb' : 'aa  \nbb');
+          expect(effective.replaceAll('\n', ''), 'aa  bb');
+          if (width == 20) {
+            expect(render.effectiveText, same(render.sourceText));
+          }
           if (rich) {
-            expect(
-              (render.effectiveText as TextSpan).children!.single,
-              same(source),
-            );
+            var leaf = render.effectiveText as TextSpan;
+            while (leaf.children?.isNotEmpty ?? false) {
+              leaf = leaf.children!.single as TextSpan;
+            }
+            expect(leaf.recognizer, same(recognizer));
+            expect(leaf.semanticsLabel, 'two words');
+            expect(leaf.locale, const Locale('en'));
+            expect(leaf.spellOut, isTrue);
           }
         },
       );

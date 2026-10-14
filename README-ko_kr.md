@@ -12,7 +12,7 @@ Flutter의 일반 텍스트와 리치 텍스트에 모델 기반 의미 단위 �
 
 ```yaml
 dependencies:
-  text_auto_wrap: ^0.1.0
+  text_auto_wrap: ^0.1.1
 ```
 
 ```dart
@@ -172,6 +172,8 @@ controller.dispose();
 ```
 
 결과에는 원본 범위, 줄, 너비, 삽입한 break offset, overflow, 의미 단위 줄바꿈 적용 여부, stable reason, 선택적인 단계·캐시 진단이 들어 있습니다.
+
+위젯 결과의 `ranges`, `lines`, `widths`는 최종 표시 레이아웃이며 추가 개행 주변의 원문 공백을 보존합니다. `diagnostics.calculatedLayouts`는 후보 평가를 위해 선택한 경계 공백을 제외한 계산 레이아웃입니다. 따라서 계산 범위·너비와 최종 위젯 결과는 다를 수 있습니다. 계산 결과가 기본 줄바꿈과 같은 break offset을 재사용하면 `applied: false`이며, 바뀌지 않은 기본 레이아웃의 범위·너비를 보고합니다.
 
 | Reason | 의미 |
 | --- | --- |

@@ -20,4 +20,4 @@ export 'src/models/language_detection.dart';
 export 'src/flutter/controller.dart';
 export 'src/flutter/text_auto_wrap.dart';
 
-const String textAutoWrapVersion = '0.1.0';
+const String textAutoWrapVersion = '0.1.1';
