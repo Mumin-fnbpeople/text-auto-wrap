@@ -12,7 +12,7 @@ This is semantic wrapping, not Python-style fixed-column wrapping. Width is base
 
 ```yaml
 dependencies:
-  text_auto_wrap: ^0.1.0
+  text_auto_wrap: ^0.1.1
 ```
 
 ```dart
@@ -172,6 +172,8 @@ controller.dispose();
 ```
 
 Results report source ranges, lines, widths, inserted break offsets, overflow, whether semantic wrapping was applied, a stable reason, and optional stage/cache diagnostics. Common reasons are:
+
+For widget results, `ranges`, `lines`, and `widths` describe the final painted layout and retain source whitespace around inserted breaks. Calculation layouts in `diagnostics.calculatedLayouts` omit selected boundary whitespace when evaluating candidates. Their ranges and widths can therefore differ from the committed widget result. A calculated selection that reuses the native break offsets has `applied: false` and reports the unchanged native geometry.
 
 | Reason | Meaning |
 | --- | --- |

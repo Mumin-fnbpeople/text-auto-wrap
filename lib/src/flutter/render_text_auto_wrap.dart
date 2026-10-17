@@ -472,12 +472,9 @@ class RenderTextAutoWrap extends RenderParagraph {
     final effective = result.applied
         ? insertLineBreaks(encoded, result.breakOffsets)
         : _sourceText;
+    var committed = result;
     var matches = true;
     if (result.applied) {
-      // Range measurement trims boundary whitespace, but the source-preserving
-      // transformation retains it. Shaping that effective paragraph can create
-      // extra lines or retain whitespace absent from selected source ranges.
-      // Validate both source coverage and geometry before committing it.
       final painter = _painter(effective, placeholders, finalLayout: false);
       try {
         painter.layout(
@@ -485,28 +482,49 @@ class RenderTextAutoWrap extends RenderParagraph {
           maxWidth: _maxLayoutWidth(constraints.maxWidth),
         );
         final lines = painter.computeLineMetrics();
+        final ranges = _preservedSelectedRanges(effective, result);
+        // Calculated ranges omit boundary whitespace; the painted source keeps
+        // it. Verify source coverage and geometry separately, then report the
+        // preserved ranges and widths actually painted.
         matches =
-            _matchesSelectedLines(effective, result) &&
+            ranges != null &&
             lines.length == result.lineCount &&
-            !List.generate(lines.length, (index) => index).any(
-              (index) =>
-                  (lines[index].width - result.widths[index]).abs() > 0.001,
+            lines.every(
+              (line) =>
+                  line.width.isFinite &&
+                  line.width >= 0 &&
+                  line.width <= constraints.maxWidth,
             );
+        if (matches) {
+          committed = _withLayout(
+            result,
+            LineBreakLayout(
+              sourceText: result.sourceText,
+              ranges: ranges,
+              widths: [for (final line in lines) line.width],
+              maxWidth: constraints.maxWidth,
+              selectedCandidates: result.selectedCandidates,
+            ),
+          );
+        }
       } finally {
         painter.dispose();
       }
     } else if (result.source == TextWrapSelectionSource.calculated) {
-      // A calculated selection may reuse native offsets without inserting any
-      // breaks. Its trimmed ranges must still match the native text we paint.
       final native = result.diagnostics?.nativeLayout ?? _fallbackLayout();
-      matches = native.lineCount == result.lineCount;
-      for (var index = 0; matches && index < native.lineCount; index++) {
-        matches =
-            native.ranges[index].start == result.ranges[index].start &&
-            native.ranges[index].end == result.ranges[index].end &&
-            native.lines[index] == result.lines[index] &&
-            (native.widths[index] - result.widths[index]).abs() <= 0.001;
+      // Identical break offsets paint the native source unchanged. Compare the
+      // boundaries, not trimmed calculated ranges against preserved whitespace.
+      matches =
+          native.lineCount == result.lineCount &&
+          native.breakOffsets.length == result.breakOffsets.length;
+      for (
+        var index = 0;
+        matches && index < native.breakOffsets.length;
+        index++
+      ) {
+        matches = native.breakOffsets[index] == result.breakOffsets[index];
       }
+      if (matches) committed = _withLayout(result, native);
     }
     if (!matches) {
       _commitFallback(
@@ -517,10 +535,22 @@ class RenderTextAutoWrap extends RenderParagraph {
       return;
     }
     _setEffectiveText(effective);
-    _commit(result);
+    _commit(committed);
   }
 
-  bool _matchesSelectedLines(InlineSpan effective, TextWrapResult result) {
+  TextWrapResult _withLayout(TextWrapResult result, LineBreakLayout layout) =>
+      TextWrapResult(
+        layout: layout,
+        applied: result.applied,
+        reason: result.reason,
+        source: result.source,
+        diagnostics: result.diagnostics,
+      );
+
+  List<TextLineRange>? _preservedSelectedRanges(
+    InlineSpan effective,
+    TextWrapResult result,
+  ) {
     final text = effective.toPlainText(includeSemanticsLabels: false);
     var inserted = 0;
     int sourceOffset(int effectiveOffset) {
@@ -531,28 +561,33 @@ class RenderTextAutoWrap extends RenderParagraph {
       return effectiveOffset - inserted;
     }
 
-    // Each calculated line has an explicit separator in the effective tree.
-    // Include trailing whitespace even when TextPainter's boundaries omit it.
-    // The separate painted-line count check rejects extra native soft wraps.
-    var line = 0;
+    final ranges = <TextLineRange>[];
     var start = 0;
     for (var end = 0; end <= text.length; end++) {
       if (end != text.length && !_isNewline(text.codeUnitAt(end))) continue;
-      if (line >= result.lineCount) return false;
-      final range = result.ranges[line];
+      if (ranges.length >= result.lineCount) return null;
+      final range = result.ranges[ranges.length];
       final sourceStart = sourceOffset(start);
       final sourceEnd = sourceOffset(end);
-      if (sourceStart != range.start ||
-          sourceEnd != range.end ||
-          text.substring(start, end) != result.lines[line]) {
-        return false;
+      if (sourceStart > range.start ||
+          sourceEnd < range.end ||
+          result.sourceText
+              .substring(sourceStart, range.start)
+              .trim()
+              .isNotEmpty ||
+          result.sourceText.substring(range.end, sourceEnd).trim().isNotEmpty ||
+          result.sourceText.substring(range.start, range.end) !=
+              result.lines[ranges.length] ||
+          text.substring(start, end) !=
+              result.sourceText.substring(sourceStart, sourceEnd)) {
+        return null;
       }
-      line++;
+      ranges.add(TextLineRange(sourceStart, sourceEnd));
       if (end == text.length) break;
       start = _nextLineStart(text, end);
       end = start - 1;
     }
-    return line == result.lineCount;
+    return ranges.length == result.lineCount ? ranges : null;
   }
 
   TextWrapResult _withRendererCache(TextWrapResult result) {
