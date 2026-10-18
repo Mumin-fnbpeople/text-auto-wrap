@@ -521,7 +521,6 @@ void main() {
         wrapHost(_ParagraphHost(render)),
         phase: EnginePhase.layout,
       );
-      expect(render.measurementHelperCalls, 0);
       expect(render.effectiveText, same(render.sourceText));
       switch (fault) {
         case _MetadataFault.missingSourceBaseline:
@@ -531,11 +530,15 @@ void main() {
           // These fixtures also violate native RenderParagraph's contract.
           // With no native geometry, preserve its failure without publishing
           // the old fabricated one-line, zero-width result.
+          // Adapter validation bypasses this override; the final native layout
+          // is attempted once even when optional diagnostic measurement fails.
+          expect(render.layoutHelperCallsWithoutResult, 1);
           expect(render.nativeLayoutError, isNotNull);
           expect(render.result, isNull);
           expect(controller.result, isNull);
         case _MetadataFault.equalButDifferentParentSpan:
         case _MetadataFault.reorderedParentSpans:
+          expect(render.layoutHelperCallsWithoutResult, 0);
           expect(render.result!.reason, 'unmeasurablePlaceholder');
           expect(render.result!.applied, isFalse);
           expect(render.result!.diagnostics, isNull);
@@ -582,7 +585,17 @@ void main() {
     final render = wrapRender(tester);
     expect(render.result!.applied, isTrue);
     expect(render.childCount, 1);
-    expect(render.result!.widths, [20, 12, 10]);
+    // A literal U+FFFC's glyph width differs between native and CanvasKit.
+    // It must retain text shaping, independently of the real widget's width.
+    final literal = TextPainter(
+      text: const TextSpan(text: 'a\uFFFC', style: wrapStyle),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    try {
+      expect(render.result!.widths, [literal.width, 12, 10]);
+    } finally {
+      literal.dispose();
+    }
     expect(_plain(render.effectiveText), 'a\uFFFC\n\uFFFC\nb');
   });
 
@@ -683,7 +696,7 @@ class _MappingParagraph extends RenderTextAutoWrap {
     }
   }
 
-  var measurementHelperCalls = 0;
+  var layoutHelperCallsWithoutResult = 0;
   Object? nativeLayoutError;
 
   @override
@@ -692,7 +705,7 @@ class _MappingParagraph extends RenderTextAutoWrap {
     ChildLayouter layoutChild,
     ChildBaselineGetter getChildBaseline,
   ) {
-    if (result == null) measurementHelperCalls++;
+    if (result == null) layoutHelperCallsWithoutResult++;
     return super.layoutInlineChildren(maxWidth, layoutChild, getChildBaseline);
   }
 

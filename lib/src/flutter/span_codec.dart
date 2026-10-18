@@ -14,6 +14,7 @@ final class EncodedInlineSpan {
 
   final String text;
   final _SourceSpan _source;
+  late final Set<int> _graphemeEndpoints = graphemeEndpoints(text);
 
   /// Widget occurrences in the same source-tree order used by range slices.
   ///
@@ -57,10 +58,19 @@ final class InlineSpanMeasurementSlice {
 
 /// Encodes nested [TextSpan] and [WidgetSpan] instances without losing metadata.
 /// Custom spans are recorded as opaque ranges and can be reused unchanged.
+/// Semantic preprocessing stops with [TextWrapInputLimitException] beyond
+/// 16,384 occurrences or depth 1,024 (root depth zero). Native rendering can
+/// still use the untouched source tree.
 EncodedInlineSpan encodeInlineSpan(InlineSpan span) {
   final buffer = StringBuffer();
+  var visited = 0;
 
-  _SourceSpan visit(InlineSpan span) {
+  _SourceSpan visit(InlineSpan span, int depth) {
+    if (++visited > 16384 || depth > 1024) {
+      throw const TextWrapInputLimitException(
+        'Semantic span preprocessing exceeds 16384 nodes or depth 1024.',
+      );
+    }
     final start = buffer.length;
     if (span is WidgetSpan) {
       buffer.write('\uFFFC');
@@ -73,19 +83,19 @@ EncodedInlineSpan encodeInlineSpan(InlineSpan span) {
     buffer.write(span.text ?? '');
     final textEnd = buffer.length;
     final children = [
-      for (final child in span.children ?? const <InlineSpan>[]) visit(child),
+      for (final child in span.children ?? const <InlineSpan>[])
+        visit(child, depth + 1),
     ];
     return _SourceSpan(span, start, textEnd, buffer.length, children);
   }
 
-  final source = visit(span);
+  final source = visit(span, 0);
   return EncodedInlineSpan._(buffer.toString(), source);
 }
 
 /// Adds newline leaves at strictly ascending interior UTF-16 [offsets].
 ///
-/// Grapheme interiors and positions adjacent to existing CR, LF, U+2028, or
-/// U+2029 newlines throw [InvalidBoundaryException]. Only changed text and its
+/// Grapheme interiors and positions adjacent to existing hard breaks throw [InvalidBoundaryException]. Only changed text and its
 /// ancestors are cloned; untouched spans and all widget children retain their
 /// identity. Breaks inside a span's own text are inserted into that string to
 /// keep its semantics and gesture target intact. Boundaries between spans use
@@ -95,10 +105,8 @@ EncodedInlineSpan encodeInlineSpan(InlineSpan span) {
 InlineSpan insertLineBreaks(EncodedInlineSpan encoded, List<int> offsets) {
   validateOffsets(encoded.text, offsets);
   for (final offset in offsets) {
-    bool isNewline(int unit) =>
-        unit == 0x0a || unit == 0x0d || unit == 0x2028 || unit == 0x2029;
-    if (isNewline(encoded.text.codeUnitAt(offset - 1)) ||
-        isNewline(encoded.text.codeUnitAt(offset))) {
+    if (isHardBreak(encoded.text.codeUnitAt(offset - 1)) ||
+        isHardBreak(encoded.text.codeUnitAt(offset))) {
       throw InvalidBoundaryException(
         'Offset $offset is adjacent to an existing newline.',
       );
@@ -120,9 +128,11 @@ InlineSpanMeasurementSlice sliceInlineSpanForMeasurement(
   int start,
   int end,
 ) {
-  if (start < 0 || start >= end || end > encoded.text.length) {
+  if (start >= end ||
+      !encoded._graphemeEndpoints.contains(start) ||
+      !encoded._graphemeEndpoints.contains(end)) {
     throw TextRangeMeasurementException(
-      'Measurement range [$start, $end) is outside the source text.',
+      'Measurement range [$start, $end) must use nonempty source grapheme endpoints.',
     );
   }
   return _MeasurementSliceBuilder(start, end).build(encoded._source);
@@ -208,7 +218,9 @@ final class _MeasurementSliceBuilder {
     if (text == null && children.isEmpty) return null;
     return _copyTextSpan(
       span,
-      text,
+      // A child-only slice still needs this ancestor's style. Labeled spans
+      // require non-null own text, even when none of that text was selected.
+      text ?? (span.semanticsLabel == null ? null : ''),
       children.isEmpty ? null : List<InlineSpan>.unmodifiable(children),
     );
   }

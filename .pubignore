@@ -1,6 +1,6 @@
 # Internal planning and review artifacts.
 .superpowers/
-docs/superpowers/
+docs/
 
 # Local SDKs, package-manager state, and generated output.
 .tooling/

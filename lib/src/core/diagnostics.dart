@@ -2,6 +2,27 @@ import 'layout.dart';
 import 'prediction.dart';
 import 'selection.dart';
 
+/// The adapter stage that failed; Flutter's final native paint is separate.
+enum TextWrapFailureStage { semanticLayout, nativeMeasurement }
+
+/// An observed adapter failure, including when no valid layout is available.
+///
+/// Source text is preserved for native rendering. These records do not imply
+/// that Flutter's own render, paint, or semantics operations are guaranteed.
+final class TextWrapFailure {
+  const TextWrapFailure({
+    required this.stage,
+    required this.reason,
+    required this.error,
+    required this.stackTrace,
+  });
+
+  final TextWrapFailureStage stage;
+  final String reason;
+  final Object error;
+  final StackTrace stackTrace;
+}
+
 /// Cumulative plan and renderer cache counters, frozen when a result is selected.
 final class TextWrapCacheDiagnostics {
   const TextWrapCacheDiagnostics({

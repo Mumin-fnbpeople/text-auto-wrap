@@ -2,6 +2,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:text_auto_wrap/text_auto_wrap.dart';
 
 void main() {
+  for (final sign in [1.0, -1.0]) {
+    test('rejects overflowing finite weight aggregate sign $sign', () {
+      expect(
+        () => BudouxPredictor({
+          'UW3': {'a': sign * 1e308, 'b': sign * 1e308},
+          'UW4': {'b': sign * 1e308},
+        }),
+        throwsA(isA<InvalidModelConfigurationException>()),
+      );
+    });
+
+    test('rejects overflowing feature score with finite base sign $sign', () {
+      final predictor = BudouxPredictor({
+        'UW3': {'a': sign * 1e308},
+        'unused': {'cancel': -sign * 1e308},
+        'UW4': {'b': sign * 1e308},
+        'unused2': {'cancel': -sign * 1e308},
+      });
+      expect(
+        () => predictor.predict('ab'),
+        throwsA(isA<InvalidModelConfigurationException>()),
+      );
+    });
+  }
+
   group('BudouxPredictor feature scoring', () {
     // A wrong feature-window position must move or remove this sole boundary.
     for (final (group, feature) in const [

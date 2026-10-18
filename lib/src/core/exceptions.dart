@@ -28,3 +28,13 @@ final class TextRangeMeasurementException extends TextWrapException {
 final class UnsupportedSpanTransformationException extends TextWrapException {
   const UnsupportedSpanTransformationException(super.message);
 }
+
+/// Semantic preprocessing was skipped before scanning oversized input.
+final class TextWrapInputLimitException implements Exception {
+  const TextWrapInputLimitException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => '$runtimeType: $message';
+}

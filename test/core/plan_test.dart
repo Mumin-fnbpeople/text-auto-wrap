@@ -2,6 +2,37 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:text_auto_wrap/text_auto_wrap.dart';
 
 void main() {
+  for (final (start, end) in [
+    (-1, 1),
+    (0, 9),
+    (3, 2),
+    (1, 2),
+    (0, 1),
+    (1, 1),
+  ]) {
+    test('guards custom measurement range [$start, $end) before callback', () {
+      var callbacks = 0;
+      final plan = createTextWrapPlan(
+        text: '😀x',
+        model: null,
+        strategy: LineBreakStrategy(
+          calculator: RangeRequestCalculator(start, end),
+        ),
+      );
+      expect(
+        () => plan.calculate(
+          maxWidth: 10,
+          measureRange: (start, end) {
+            callbacks++;
+            return 1;
+          },
+        ),
+        throwsA(isA<TextRangeMeasurementException>()),
+      );
+      expect(callbacks, 0);
+    });
+  }
+
   for (final (name, ranges, widths)
       in <(String, List<TextLineRange>, List<double>)>[
         (
@@ -385,4 +416,25 @@ final class InconsistentCalculator implements LayoutCalculator {
       selectedCandidates: [candidates.single],
     ),
   ]);
+}
+
+final class RangeRequestCalculator implements LayoutCalculator {
+  RangeRequestCalculator(this.start, this.end);
+  final int start;
+  final int end;
+  @override
+  LayoutCalculationResult calculate({
+    required String text,
+    required List<BreakCandidate> candidates,
+    required double maxWidth,
+    required TextRangeMeasurer measureRange,
+    LineBreakLayout? baseline,
+  }) {
+    measureRange(start, end);
+    return const LayoutCalculationLimit(
+      kind: LayoutCalculationLimitKind.states,
+      limit: 1,
+      observedCount: 2,
+    );
+  }
 }
