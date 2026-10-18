@@ -27,6 +27,7 @@ final class TextWrapPlan {
   final LineBreakStrategy strategy;
   List<BreakPrediction>? _predictions;
   List<BreakCandidate>? _candidates;
+  late final Set<int> _graphemeEndpoints = graphemeEndpoints(text);
   Object? _measurementKey;
   Map<(int, int), double> _widths = {};
   int _predictionRuns = 0, _predictionHits = 0;
@@ -40,6 +41,7 @@ final class TextWrapPlan {
       _predictionHits++;
       return _predictions!;
     }
+    _checkInputLength();
     final resolved = model;
     final result = resolved == null
         ? <BreakPrediction>[]
@@ -55,6 +57,7 @@ final class TextWrapPlan {
       return _candidates!;
     }
     final predictions = predict();
+    _checkInputLength();
     final resolved = model;
     final result = resolved == null
         ? <BreakCandidate>[]
@@ -81,6 +84,7 @@ final class TextWrapPlan {
     Object? measurementCacheKey,
   }) {
     _validate(maxWidth, nativeLayout, null);
+    _checkInputLength();
     final candidates = aggregate();
     final measure = _measurer(measureRange, measurementCacheKey);
     final native = nativeLayout == null
@@ -186,15 +190,24 @@ final class TextWrapPlan {
     bool diagnostics = false,
   }) {
     _validate(maxWidth, nativeLayout, maxLines);
-    final candidates = aggregate();
+    if (text.length > maxSemanticTextLength && nativeLayout == null) {
+      _checkInputLength();
+    }
+    final candidates = text.length > maxSemanticTextLength
+        ? <BreakCandidate>[]
+        : aggregate();
     final measure = _measurer(measureRange, measurementCacheKey);
     var native = nativeLayout == null
         ? null
+        : text.length > maxSemanticTextLength
+        ? nativeLayout
         : _scoreNative(nativeLayout, maxWidth);
     LayoutCalculationLimit? limit;
     List<LineBreakLayout> layouts = const [];
     LayoutSelectionDecision decision;
-    if (model == null) {
+    if (text.length > maxSemanticTextLength) {
+      decision = const LayoutSelectionDecision.native(reason: 'inputLimit');
+    } else if (model == null) {
       decision = const LayoutSelectionDecision.native(
         reason: 'unsupportedLanguage',
       );
@@ -256,7 +269,7 @@ final class TextWrapPlan {
       source: decision.source,
       diagnostics: diagnostics
           ? TextWrapDiagnostics(
-              predictions: _predictions!,
+              predictions: _predictions ?? const [],
               candidates: candidates,
               calculatedLayouts: layouts,
               nativeLayout: native,
@@ -275,6 +288,14 @@ final class TextWrapPlan {
             )
           : null,
     );
+  }
+
+  void _checkInputLength() {
+    if (text.length > maxSemanticTextLength) {
+      throw const TextWrapInputLimitException(
+        'Semantic input exceeds 65536 UTF-16 code units.',
+      );
+    }
   }
 
   void _validate(double width, LineBreakLayout? native, int? maxLines) {
@@ -301,6 +322,13 @@ final class TextWrapPlan {
     // Capture this generation: callbacks may synchronously reenter the plan.
     final widths = _widths;
     return (start, end) {
+      if (start > end ||
+          !_graphemeEndpoints.contains(start) ||
+          !_graphemeEndpoints.contains(end)) {
+        throw TextRangeMeasurementException(
+          'Measurement range [$start, $end) must use ordered source grapheme endpoints.',
+        );
+      }
       final range = (start, end);
       final cached = key == null ? null : widths[range];
       if (cached != null) {
@@ -324,20 +352,24 @@ final class TextWrapPlan {
 
   LineBreakLayout _scoreNative(LineBreakLayout native, double maxWidth) {
     final byOffset = {
-      for (final candidate in _candidates!) candidate.offset: candidate,
+      for (final candidate in _candidates ?? const <BreakCandidate>[])
+        candidate.offset: candidate,
     };
     final breaks = <BreakCandidate>[];
+    final permitted = allowedBoundaries(text, BoundaryMode.characters).toSet();
     for (var index = 1; index < native.ranges.length; index++) {
       final previous = native.ranges[index - 1];
       final current = native.ranges[index];
       // Native ranges may include the newline or exclude it in their gap.
-      if (RegExp(
-        r'[\r\n\u2028\u2029]',
-      ).hasMatch(text.substring(previous.start, current.start))) {
+      if (hardBreakPattern.hasMatch(
+        text.substring(previous.start, current.start),
+      )) {
         continue;
       }
       final offset = current.start;
-      if (offset <= 0 || offset >= text.length) continue;
+      if (offset <= 0 || offset >= text.length || !permitted.contains(offset)) {
+        continue;
+      }
       breaks.add(
         byOffset[offset] ??
             BreakCandidate(

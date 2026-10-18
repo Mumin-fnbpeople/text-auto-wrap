@@ -7,6 +7,33 @@ import 'package:text_auto_wrap/src/flutter/span_codec.dart';
 import 'package:text_auto_wrap/text_auto_wrap.dart';
 
 void main() {
+  test('encoding and insertion preserve isolated source surrogate units', () {
+    final text = String.fromCharCodes([0xd800, 0x200b, 0xdc00]);
+    final encoded = encodeInlineSpan(TextSpan(text: text));
+    expect(encoded.text.codeUnits, text.codeUnits);
+    final rewritten = insertLineBreaks(encoded, [
+      1,
+      2,
+    ]).toPlainText(includeSemanticsLabels: false);
+    expect(rewritten.codeUnits, [0xd800, 10, 0x200b, 10, 0xdc00]);
+  });
+
+  test('measurement slices reject grapheme interiors across styled spans', () {
+    const root = TextSpan(
+      children: [
+        TextSpan(text: 'a'),
+        TextSpan(text: '\u0301😀b'),
+      ],
+    );
+    final encoded = encodeInlineSpan(root);
+    for (final (start, end) in [(0, 1), (1, 4), (0, 3), (3, 5)]) {
+      expect(
+        () => sliceInlineSpanForMeasurement(encoded, start, end),
+        throwsA(isA<TextRangeMeasurementException>()),
+      );
+    }
+  });
+
   test('encodes source text, newlines, and one code unit per widget', () {
     const root = TextSpan(
       text: 'A\n',

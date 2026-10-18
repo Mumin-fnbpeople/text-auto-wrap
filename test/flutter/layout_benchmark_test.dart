@@ -1,6 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 
-import '../../benchmark/layout_benchmark.dart';
+import '../support/layout_benchmark_harness.dart';
 
 void main() {
   testWidgets(
@@ -9,15 +11,36 @@ void main() {
       List<Map<String, Object?>>? rows;
 
       await tester.pumpWidget(
-        BenchmarkHarness(iterations: 2, onComplete: (value) => rows = value),
+        BenchmarkHarness(
+          iterations: const int.fromEnvironment(
+            'TEXT_AUTO_WRAP_BENCHMARK_ITERATIONS',
+            defaultValue: 2,
+          ),
+          onComplete: (value) => rows = value,
+        ),
       );
       await tester.pumpAndSettle();
 
-      expect(rows, hasLength(12));
+      expect(rows, hasLength(24));
       final completed = rows!;
+      if (const bool.fromEnvironment('TEXT_AUTO_WRAP_BENCHMARK_REPORT')) {
+        for (final row in completed) {
+          // ignore: avoid_print
+          print(jsonEncode(row));
+        }
+      }
       expect(
         completed.map((row) => row['scenario']),
-        containsAll(<String>['nested-100-spans', 'placeholders-20']),
+        containsAll(<String>[
+          'nested-100-spans',
+          'placeholders-20',
+          'intrinsic-timeline-12',
+          'intrinsic-table-12',
+          'survey-grid-12',
+          'rich-search-list-12',
+          'scaled-widget-spans-12',
+          'equal-height-three-passes-12',
+        ]),
       );
       expect(
         completed.singleWhere(
@@ -36,6 +59,19 @@ void main() {
       for (final row in completed.where((row) => row['cache'] == 'warm')) {
         expect(row['cacheHits'], greaterThan(0));
       }
+      for (final row in completed.where(
+        (row) => (row['scenario']! as String).endsWith('-12'),
+      )) {
+        expect(row['rendererCount'], 12);
+      }
+      expect(
+        completed.singleWhere(
+          (row) =>
+              row['scenario'] == 'scaled-widget-spans-12' &&
+              row['cache'] == 'warm',
+        )['textScale'],
+        1.5,
+      );
     },
   );
 }

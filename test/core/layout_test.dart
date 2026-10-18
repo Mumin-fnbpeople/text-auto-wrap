@@ -30,6 +30,37 @@ List<LineBreakLayout> calculate(
         .layouts;
 
 void main() {
+  test('layout preserves original UTF-16 units around zero width controls', () {
+    final text = String.fromCharCodes([0x61, 0xd800, 0x200b, 0xdc00, 0x62]);
+    final layout =
+        LineBreakLayoutCandidate(
+          sourceText: text,
+          selectedCandidates: [candidate(2), candidate(3)],
+        ).measure(
+          maxWidth: 20,
+          measureRange: (start, end) => (end - start).toDouble(),
+        );
+    expect(layout.lines.join().codeUnits, text.codeUnits);
+  });
+
+  for (final glue in ['\u00a0', '\u202f', '\ufeff', '\u2060']) {
+    test(
+      'selected whitespace preserves adjacent nonbreaking source units ${glue.codeUnitAt(0)}',
+      () {
+        final text = 'a${glue}b c';
+        final layout =
+            LineBreakLayoutCandidate(
+              sourceText: text,
+              selectedCandidates: [candidate(4)],
+            ).measure(
+              maxWidth: 20,
+              measureRange: (start, end) => (end - start).toDouble(),
+            );
+        expect(layout.lines, ['a${glue}b', 'c']);
+      },
+    );
+  }
+
   test(
     'native measured ranges derive metrics and freeze caller-owned lists',
     () {
@@ -389,6 +420,117 @@ void main() {
     }
   });
 
+  for (final calculator in [
+    ('optimal', optimalLayouts()),
+    ('greedy', greedy()),
+    ('nearby', nearbyLayouts()),
+  ]) {
+    test('rejects cumulative cost overflow with ${calculator.$1}', () {
+      expect(
+        () => calculator.$2.calculate(
+          text: 'abc',
+          candidates: [candidate(1, 1e308), candidate(2, 1e308)],
+          maxWidth: 1,
+          measureRange: (start, end) => (end - start).toDouble(),
+        ),
+        throwsA(isA<InvalidModelConfigurationException>()),
+      );
+    });
+  }
+
+  test('finite optimal cost survives dominated overflowing prefixes', () {
+    final layout = calculate(
+      'abcd',
+      [candidate(1, 1e308), candidate(2, 1e308), candidate(3, 1e308)],
+      2,
+      measureRange: (start, end) => (end - start).toDouble(),
+    ).single;
+    expect(layout.breakOffsets, [2]);
+    expect(layout.totalModelCost, 1e308);
+  });
+
+  test(
+    'finite optimum survives overflowing path dominated only at completion',
+    () {
+      final widths = <(int, int), double>{
+        (0, 1): 1,
+        (1, 3): 2,
+        (3, 5): 2,
+        (0, 2): 2,
+        (2, 4): 4,
+        (4, 5): 4,
+      };
+      final layout = calculate(
+        'abcde',
+        [
+          candidate(1, 1e308),
+          candidate(2, 0),
+          candidate(3, 1e308),
+          candidate(4, 1e308),
+        ],
+        4,
+        measureRange: (start, end) => widths[(start, end)] ?? 100,
+      ).single;
+      expect(layout.breakOffsets, [2, 4]);
+      expect(layout.totalModelCost, 1e308);
+    },
+  );
+
+  test('nearby maximum radius includes all candidate neighbors', () {
+    final candidates = [candidate(1), candidate(2), candidate(3)];
+    final baseline = calculate(
+      'abcd',
+      candidates,
+      2,
+      calculator: greedy(),
+      measureRange: (start, end) => (end - start).toDouble(),
+    ).single;
+    final layouts = calculate(
+      'abcd',
+      candidates,
+      2,
+      calculator: nearbyLayouts(radius: int.parse('9223372036854775807')),
+      baseline: baseline,
+      measureRange: (start, end) => (end - start).toDouble(),
+    );
+    expect(layouts.map((layout) => layout.breakOffsets), [
+      [1],
+      [2],
+      [3],
+    ]);
+  });
+
+  test('rejects cumulative cost overflow in a measured candidate', () {
+    expect(
+      () =>
+          LineBreakLayoutCandidate(
+            sourceText: 'abc',
+            selectedCandidates: [candidate(1, 1e308), candidate(2, 1e308)],
+          ).measure(
+            maxWidth: 1,
+            measureRange: (start, end) => (end - start).toDouble(),
+          ),
+      throwsA(isA<InvalidModelConfigurationException>()),
+    );
+  });
+
+  test('rejects cumulative cost overflow in an already measured layout', () {
+    expect(
+      () => LineBreakLayout(
+        sourceText: 'abc',
+        ranges: const [
+          TextLineRange(0, 1),
+          TextLineRange(1, 2),
+          TextLineRange(2, 3),
+        ],
+        widths: const [1, 1, 1],
+        selectedCandidates: [candidate(1, 1e308), candidate(2, 1e308)],
+        maxWidth: 1,
+      ),
+      throwsA(isA<InvalidModelConfigurationException>()),
+    );
+  });
+
   test('rejects invalid available widths and candidate penalties', () {
     for (final width in [-1.0, double.nan, double.infinity]) {
       expect(
@@ -492,6 +634,25 @@ void main() {
         expect(measure.calls, isEmpty);
       }
     }
+  });
+
+  test('state ceiling includes final paths discarded by scalar dominance', () {
+    final result = optimalLayouts().calculate(
+      text: 'a' * 85,
+      candidates: [
+        for (var offset = 1; offset < 85; offset++)
+          candidate(offset, (offset % 3).toDouble()),
+      ],
+      maxWidth: 7,
+      measureRange: (start, end) => end - start > 7
+          ? 1000
+          : ((start * 31 + end * 71 + 51) % 101) / 101 * 7,
+    );
+    expect(result, isA<LayoutCalculationLimit>());
+    final limit = result as LayoutCalculationLimit;
+    expect(limit.kind, LayoutCalculationLimitKind.states);
+    expect(limit.limit, 16384);
+    expect(limit.observedCount, 16385);
   });
 
   test('state ceiling returns a typed outcome instead of partial layouts', () {

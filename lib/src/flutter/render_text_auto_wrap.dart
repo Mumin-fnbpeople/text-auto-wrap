@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
+import '../core/boundaries.dart';
 import '../core/diagnostics.dart';
 import '../core/exceptions.dart';
 import '../core/layout.dart';
@@ -12,6 +13,7 @@ import '../core/strategy.dart';
 import '../models/language_detection.dart';
 import 'controller.dart';
 import 'span_codec.dart';
+import 'text_geometry.dart';
 
 /// A [RenderParagraph] that chooses semantic line breaks before final layout.
 ///
@@ -42,6 +44,7 @@ class RenderTextAutoWrap extends RenderParagraph {
   }) : _sourceText = sourceText,
        _model = model,
        _strategy = strategy,
+       _sourceContainsOpaqueSpan = _containsOpaqueSpan(sourceText),
        _controller = controller,
        _devicePixelRatio = devicePixelRatio,
        _effectiveTextKey = _InlineSpanCacheKey(sourceText),
@@ -67,12 +70,19 @@ class RenderTextAutoWrap extends RenderParagraph {
   LineBreakStrategy _strategy;
   TextAutoWrapController? _controller;
   TextWrapResult? _lastResult;
+  List<TextWrapFailure> _lastFailures = const [];
   TextWrapPlan? _cachedPlan;
   _RendererPlanKey? _cachedPlanKey;
   _RendererSelectionKey? _cachedSelectionKey;
   TextWrapResult? _cachedSelection;
+  InlineSpan? _cachedEffectiveText;
+  bool _sourceContainsOpaqueSpan;
+  bool _opaqueTextNeedsRefresh = false;
   _InlineSpanCacheKey _effectiveTextKey;
   double _devicePixelRatio;
+  TextPainter? _sourceQueryPainter;
+  Object? _sourceQueryKey;
+  final _sourceQueries = <(double, double), _SourceQueryMetrics>{};
   var _planHits = 0;
   var _planMisses = 0;
   var _selectionCacheHits = 0;
@@ -99,9 +109,22 @@ class RenderTextAutoWrap extends RenderParagraph {
   @visibleForTesting
   TextWrapResult? get result => _lastResult;
 
+  /// Adapter failures from the latest layout, including unavailable geometry.
+  List<TextWrapFailure> get failures => _lastFailures;
+
   set sourceText(InlineSpan value) {
     if (identical(_sourceText, value)) return;
+    final unchanged =
+        _InlineSpanCacheKey(_sourceText) == _InlineSpanCacheKey(value);
     _sourceText = value;
+    _sourceContainsOpaqueSpan = _containsOpaqueSpan(value);
+    // Rebuilt equivalent spans must not temporarily remove semantic breaks:
+    // replacing the paragraph disposes active selection fragments, which can
+    // collapse selection when the renderer also moves to another parent.
+    if (unchanged) {
+      markNeedsLayout();
+      return;
+    }
     // Parents can request intrinsic/dry sizes before performLayout. Restore
     // the current source in Flutter's painters before they choose constraints.
     _replaceParagraphText(value);
@@ -125,7 +148,11 @@ class RenderTextAutoWrap extends RenderParagraph {
     _controller?.detachOwner(this);
     _controller = value;
     final result = _lastResult;
-    if (result != null) _controller?.commitResult(this, result);
+    if (result != null) {
+      _controller?.commitResult(this, result, failures: _lastFailures);
+    } else if (_lastFailures.isNotEmpty) {
+      _controller?.clearResult(this, failures: _lastFailures);
+    }
   }
 
   @override
@@ -142,8 +169,14 @@ class RenderTextAutoWrap extends RenderParagraph {
 
     TextPainter? sourcePainter;
     LineBreakLayout? nativeLayout;
+    var nativeMeasurementAttempted = false;
     try {
       final encoded = encodeInlineSpan(_sourceText);
+      if (encoded.text.length > maxSemanticTextLength) {
+        throw const TextWrapInputLimitException(
+          'Semantic input exceeds 65536 UTF-16 code units.',
+        );
+      }
       late final List<PlaceholderDimensions> placeholders;
       try {
         placeholders = _layoutPlaceholders(
@@ -157,12 +190,13 @@ class RenderTextAutoWrap extends RenderParagraph {
         final nativePlaceholders = _layoutPlaceholdersForNativeFallback(
           constraints.maxWidth,
         );
-        sourcePainter = _painter(_sourceText, nativePlaceholders)
-          ..layout(
-            minWidth: constraints.minWidth,
-            maxWidth: _maxLayoutWidth(constraints.maxWidth),
-          );
-        nativeLayout = _nativeLayout(
+        nativeMeasurementAttempted = true;
+        sourcePainter = _painter(_sourceText, nativePlaceholders);
+        sourcePainter.layout(
+          minWidth: constraints.minWidth,
+          maxWidth: _maxLayoutWidth(constraints.maxWidth),
+        );
+        nativeLayout = measureNativeTextLayout(
           sourcePainter,
           encoded.text,
           constraints.maxWidth,
@@ -198,15 +232,22 @@ class RenderTextAutoWrap extends RenderParagraph {
       final cached = _cachedSelection;
       if (_cachedSelectionKey == selectionKey && cached != null) {
         _selectionCacheHits++;
-        _commitSelection(encoded, _withRendererCache(cached), placeholders);
+        nativeLayout = cached.diagnostics?.nativeLayout;
+        // The complete measurement key includes the current child dimensions.
+        // Reuse the paragraph already checked against native paint instead of
+        // inserting breaks and shaping a second validation paragraph on every
+        // equal-height parent pass.
+        _setEffectiveText(_cachedEffectiveText!);
+        _commit(_withRendererCache(cached));
       } else {
         _selectionCacheMisses++;
-        sourcePainter = _painter(_sourceText, placeholders)
-          ..layout(
-            minWidth: constraints.minWidth,
-            maxWidth: _maxLayoutWidth(constraints.maxWidth),
-          );
-        nativeLayout = _nativeLayout(
+        nativeMeasurementAttempted = true;
+        sourcePainter = _painter(_sourceText, placeholders);
+        sourcePainter.layout(
+          minWidth: constraints.minWidth,
+          maxWidth: _maxLayoutWidth(constraints.maxWidth),
+        );
+        nativeLayout = measureNativeTextLayout(
           sourcePainter,
           encoded.text,
           constraints.maxWidth,
@@ -220,17 +261,33 @@ class RenderTextAutoWrap extends RenderParagraph {
           measurementCacheKey: measurementKey,
           diagnostics: true,
         );
-        _cachedSelectionKey = selectionKey;
-        _cachedSelection = result;
         _commitSelection(encoded, _withRendererCache(result), placeholders);
+        if (_lastFailures.isEmpty && _lastResult != null) {
+          _cachedSelectionKey = selectionKey;
+          _cachedSelection = _lastResult;
+          _cachedEffectiveText = super.text;
+        }
       }
-    } catch (error) {
+    } catch (error, stackTrace) {
       // Rendering valid content wins over a semantic-layout attempt. This also
       // covers invalid custom predictions, unavailable measurements, and span
       // transformations that would discard custom InlineSpan state.
       _commitFallback(
         reason: _fallbackReason(error),
         nativeLayout: nativeLayout,
+        measureNative:
+            !nativeMeasurementAttempted &&
+            error is! TextWrapInputLimitException,
+        failures: [
+          TextWrapFailure(
+            stage: nativeMeasurementAttempted && nativeLayout == null
+                ? TextWrapFailureStage.nativeMeasurement
+                : TextWrapFailureStage.semanticLayout,
+            reason: _fallbackReason(error),
+            error: error,
+            stackTrace: stackTrace,
+          ),
+        ],
       );
     } finally {
       sourcePainter?.dispose();
@@ -239,8 +296,161 @@ class RenderTextAutoWrap extends RenderParagraph {
   }
 
   @override
+  double computeMinIntrinsicWidth(double height) => _canUseNativeSourceQueries
+      ? super.computeMinIntrinsicWidth(height)
+      : _sourceIntrinsicWidth(minimum: true);
+
+  @override
+  double computeMaxIntrinsicWidth(double height) => _canUseNativeSourceQueries
+      ? super.computeMaxIntrinsicWidth(height)
+      : _sourceIntrinsicWidth(minimum: false);
+
+  double _sourceIntrinsicWidth({required bool minimum}) {
+    // Inserted breaks depend on the width chosen by the parent. Feeding them
+    // back into intrinsic width makes a later parent layout shrink based on
+    // the previous selection, even when every source input is unchanged.
+    final placeholders = layoutInlineChildren(
+      double.infinity,
+      (child, _) => Size(
+        minimum
+            ? child.getMinIntrinsicWidth(double.infinity)
+            : child.getMaxIntrinsicWidth(double.infinity),
+        0,
+      ),
+      ChildLayoutHelper.getDryBaseline,
+    );
+    final metrics = _sourceQuery(placeholders, 0, double.infinity);
+    return minimum ? metrics.minIntrinsicWidth : metrics.maxIntrinsicWidth;
+  }
+
+  @override
+  double computeMinIntrinsicHeight(double width) => _canUseNativeSourceQueries
+      ? super.computeMinIntrinsicHeight(width)
+      : _sourceDryMeasurement(width, width).size.height;
+
+  @override
+  double computeMaxIntrinsicHeight(double width) => _canUseNativeSourceQueries
+      ? super.computeMaxIntrinsicHeight(width)
+      : _sourceDryMeasurement(width, width).size.height;
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      _canUseNativeSourceQueries
+      ? super.computeDryLayout(constraints)
+      : constraints.constrain(
+          _sourceDryMeasurement(
+            constraints.minWidth,
+            constraints.maxWidth,
+          ).size,
+        );
+
+  @override
+  double computeDryBaseline(
+    BoxConstraints constraints,
+    TextBaseline baseline,
+  ) => _canUseNativeSourceQueries
+      ? super.computeDryBaseline(constraints, baseline)
+      : _sourceDryMeasurement(
+          constraints.minWidth,
+          constraints.maxWidth,
+        ).baseline;
+
+  // Flutter's separate intrinsic painter compares span identity/equality. It
+  // cannot observe opaque span mutations, even after the painted paragraph was
+  // refreshed. Keep those queries in our explicitly invalidated source cache.
+  bool get _canUseNativeSourceQueries =>
+      !_sourceContainsOpaqueSpan && identical(super.text, _sourceText);
+
+  _SourceQueryMetrics _sourceDryMeasurement(double minWidth, double maxWidth) {
+    // A speculative parent query must not inherit breaks chosen for an earlier
+    // width. Keep the same source-based estimate used before the first layout,
+    // without replacing the committed paragraph or publishing a selection.
+    final placeholders = layoutInlineChildren(
+      maxWidth,
+      ChildLayoutHelper.dryLayoutChild,
+      ChildLayoutHelper.getDryBaseline,
+    );
+    return _sourceQuery(placeholders, minWidth, _maxLayoutWidth(maxWidth));
+  }
+
+  _SourceQueryMetrics _sourceQuery(
+    List<PlaceholderDimensions> placeholders,
+    double minWidth,
+    double maxWidth,
+  ) {
+    final key = (
+      _RendererMeasurementKey(
+        source: _sourceText,
+        maxWidth: 0,
+        textDirection: textDirection,
+        textScaler: textScaler,
+        locale: locale,
+        strutStyle: strutStyle,
+        textWidthBasis: textWidthBasis,
+        textHeightBehavior: textHeightBehavior,
+        placeholders: _PlaceholderCacheKey(placeholders),
+      ),
+      textAlign,
+      maxLines,
+      overflow,
+    );
+    if (_sourceQueryKey != key) {
+      _clearSourceQueries();
+      _sourceQueryPainter = _painter(_sourceText, placeholders);
+      _sourceQueryKey = key;
+    }
+    final bounds = (minWidth, maxWidth);
+    final cached = _sourceQueries[bounds];
+    if (cached != null) return cached;
+    final painter = _sourceQueryPainter!;
+    try {
+      painter.layout(minWidth: minWidth, maxWidth: maxWidth);
+      final metrics = _SourceQueryMetrics(
+        painter.minIntrinsicWidth,
+        painter.maxIntrinsicWidth,
+        painter.size,
+        painter.computeDistanceToActualBaseline(TextBaseline.alphabetic),
+      );
+      _sourceQueries[bounds] = metrics;
+      if (_sourceQueries.length > 8) {
+        _sourceQueries.remove(_sourceQueries.keys.first);
+      }
+      return metrics;
+    } catch (_) {
+      _clearSourceQueries();
+      rethrow;
+    }
+  }
+
+  void _clearSourceQueries() {
+    _sourceQueryPainter?.dispose();
+    _sourceQueryPainter = null;
+    _sourceQueryKey = null;
+    _sourceQueries.clear();
+  }
+
+  @override
+  void markNeedsLayout() {
+    // Includes child layout changes and explicitly dirtied custom spans.
+    _clearSourceQueries();
+    // Custom spans may change their shaping without changing their identity or
+    // equality. An explicit invalidation must remeasure them, including ranges
+    // held by the plan. Built-in immutable spans use the full measurement key.
+    if (_sourceContainsOpaqueSpan) {
+      _opaqueTextNeedsRefresh = true;
+      _cachedPlan = null;
+      _cachedPlanKey = null;
+      _cachedSelection = null;
+      _cachedSelectionKey = null;
+      _cachedEffectiveText = null;
+    }
+    super.markNeedsLayout();
+  }
+
+  @override
   void systemFontsDidChange() {
     super.systemFontsDidChange();
+    _clearSourceQueries();
     // A plan owns shaped range widths, and a cached selection owns the
     // resulting native geometry. Neither remains valid after font metrics
     // change, even when every public render input is unchanged.
@@ -248,6 +458,20 @@ class RenderTextAutoWrap extends RenderParagraph {
     _cachedPlanKey = null;
     _cachedSelection = null;
     _cachedSelectionKey = null;
+    _cachedEffectiveText = null;
+  }
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    // A clean paragraph can reattach without another performLayout. Restore
+    // any notification cancelled by detach using its last committed snapshot.
+    final result = _lastResult;
+    if (result != null) {
+      _controller?.commitResult(this, result, failures: _lastFailures);
+    } else if (_lastFailures.isNotEmpty) {
+      _controller?.clearResult(this, failures: _lastFailures);
+    }
   }
 
   @override
@@ -258,6 +482,7 @@ class RenderTextAutoWrap extends RenderParagraph {
 
   @override
   void dispose() {
+    _clearSourceQueries();
     _controller?.detachOwner(this);
     super.dispose();
   }
@@ -374,42 +599,6 @@ class RenderTextAutoWrap extends RenderParagraph {
     textHeightBehavior: textHeightBehavior,
   )..setPlaceholderDimensions(placeholders);
 
-  LineBreakLayout _nativeLayout(
-    TextPainter painter,
-    String source,
-    double maxWidth,
-  ) {
-    final ranges = <TextLineRange>[];
-    final widths = <double>[];
-    var offset = 0;
-    for (final metrics in painter.computeLineMetrics()) {
-      if (offset == source.length) {
-        ranges.add(TextLineRange(offset, offset));
-        widths.add(metrics.width);
-        continue;
-      }
-      final boundary = painter.getLineBoundary(TextPosition(offset: offset));
-      final delimiterStart = metrics.hardBreak
-          ? _hardBreakStart(source, boundary.start, boundary.end)
-          : null;
-      ranges.add(TextLineRange(boundary.start, delimiterStart ?? boundary.end));
-      widths.add(metrics.width);
-      offset = delimiterStart == null
-          ? boundary.end
-          : _nextLineStart(source, delimiterStart);
-    }
-    if (ranges.isEmpty) {
-      ranges.add(const TextLineRange(0, 0));
-      widths.add(0);
-    }
-    return LineBreakLayout(
-      sourceText: source,
-      ranges: ranges,
-      widths: widths,
-      maxWidth: maxWidth,
-    );
-  }
-
   double _measureRange(
     EncodedInlineSpan encoded,
     int start,
@@ -430,13 +619,7 @@ class RenderTextAutoWrap extends RenderParagraph {
     final painter = _painter(slice.span, dimensions, finalLayout: false);
     try {
       painter.layout(maxWidth: double.infinity);
-      final width = painter.width;
-      if (!width.isFinite || width < 0) {
-        throw TextRangeMeasurementException(
-          'TextPainter returned an invalid range width.',
-        );
-      }
-      return width;
+      return normalizedFlutterWidth(painter.width);
     } finally {
       painter.dispose();
     }
@@ -481,27 +664,26 @@ class RenderTextAutoWrap extends RenderParagraph {
           minWidth: constraints.minWidth,
           maxWidth: _maxLayoutWidth(constraints.maxWidth),
         );
-        final lines = painter.computeLineMetrics();
-        final ranges = _preservedSelectedRanges(effective, result);
+        final painted = measureNativeTextLayout(
+          painter,
+          effective.toPlainText(includeSemanticsLabels: false),
+          constraints.maxWidth,
+        );
+        final ranges = _preservedSelectedRanges(painted, result);
         // Calculated ranges omit boundary whitespace; the painted source keeps
         // it. Verify source coverage and geometry separately, then report the
         // preserved ranges and widths actually painted.
         matches =
             ranges != null &&
-            lines.length == result.lineCount &&
-            lines.every(
-              (line) =>
-                  line.width.isFinite &&
-                  line.width >= 0 &&
-                  line.width <= constraints.maxWidth,
-            );
+            painted.lineCount == result.lineCount &&
+            !painted.overflow;
         if (matches) {
           committed = _withLayout(
             result,
             LineBreakLayout(
               sourceText: result.sourceText,
               ranges: ranges,
-              widths: [for (final line in lines) line.width],
+              widths: painted.widths,
               maxWidth: constraints.maxWidth,
               selectedCandidates: result.selectedCandidates,
             ),
@@ -531,6 +713,17 @@ class RenderTextAutoWrap extends RenderParagraph {
         reason: 'invalidRuntimeMeasurement',
         nativeLayout: result.diagnostics?.nativeLayout,
         diagnostics: result.diagnostics,
+        measureNative: false,
+        failures: [
+          TextWrapFailure(
+            stage: TextWrapFailureStage.semanticLayout,
+            reason: 'invalidRuntimeMeasurement',
+            error: const TextRangeMeasurementException(
+              'Calculated source coverage or geometry differs from native paint.',
+            ),
+            stackTrace: StackTrace.current,
+          ),
+        ],
       );
       return;
     }
@@ -548,10 +741,10 @@ class RenderTextAutoWrap extends RenderParagraph {
       );
 
   List<TextLineRange>? _preservedSelectedRanges(
-    InlineSpan effective,
+    LineBreakLayout painted,
     TextWrapResult result,
   ) {
-    final text = effective.toPlainText(includeSemanticsLabels: false);
+    final text = painted.sourceText;
     var inserted = 0;
     int sourceOffset(int effectiveOffset) {
       while (inserted < result.breakOffsets.length &&
@@ -562,30 +755,31 @@ class RenderTextAutoWrap extends RenderParagraph {
     }
 
     final ranges = <TextLineRange>[];
-    var start = 0;
-    for (var end = 0; end <= text.length; end++) {
-      if (end != text.length && !_isNewline(text.codeUnitAt(end))) continue;
+    for (final paintedRange in painted.ranges) {
       if (ranges.length >= result.lineCount) return null;
       final range = result.ranges[ranges.length];
-      final sourceStart = sourceOffset(start);
-      final sourceEnd = sourceOffset(end);
-      if (sourceStart > range.start ||
+      final sourceStart = sourceOffset(paintedRange.start);
+      final sourceEnd = sourceOffset(paintedRange.end);
+      if (sourceStart < 0 ||
+          sourceEnd < sourceStart ||
+          sourceEnd > result.sourceText.length ||
+          sourceStart > range.start ||
           sourceEnd < range.end ||
           result.sourceText
               .substring(sourceStart, range.start)
-              .trim()
-              .isNotEmpty ||
-          result.sourceText.substring(range.end, sourceEnd).trim().isNotEmpty ||
+              .characters
+              .any((grapheme) => !isBreakableWhitespace(grapheme)) ||
+          result.sourceText
+              .substring(range.end, sourceEnd)
+              .characters
+              .any((grapheme) => !isBreakableWhitespace(grapheme)) ||
           result.sourceText.substring(range.start, range.end) !=
               result.lines[ranges.length] ||
-          text.substring(start, end) !=
+          text.substring(paintedRange.start, paintedRange.end) !=
               result.sourceText.substring(sourceStart, sourceEnd)) {
         return null;
       }
       ranges.add(TextLineRange(sourceStart, sourceEnd));
-      if (end == text.length) break;
-      start = _nextLineStart(text, end);
-      end = start - 1;
     }
     return ranges.length == result.lineCount ? ranges : null;
   }
@@ -617,7 +811,7 @@ class RenderTextAutoWrap extends RenderParagraph {
 
   void _setEffectiveText(InlineSpan value) {
     final key = _InlineSpanCacheKey(value);
-    if (_effectiveTextKey == key) return;
+    if (_effectiveTextKey == key && !_opaqueTextNeedsRefresh) return;
     // RenderParagraph's public setter correctly resets its private painter,
     // semantics, overflow, and selection caches. Flutter permits this
     // synchronous render-tree mutation through the documented layout callback;
@@ -630,23 +824,61 @@ class RenderTextAutoWrap extends RenderParagraph {
 
   void _replaceParagraphText(InlineSpan value) {
     final key = _InlineSpanCacheKey(value);
-    if (_effectiveTextKey == key) return;
+    if (_effectiveTextKey == key && !_opaqueTextNeedsRefresh) return;
     // TextSpan.compareTo omits locale/spellOut, which affect semantics and
     // shaping. Force an otherwise comparison-identical replacement through.
-    if (super.text.compareTo(value) == RenderComparison.identical) {
+    if (_opaqueTextNeedsRefresh ||
+        super.text.compareTo(value) == RenderComparison.identical) {
       super.text = _metadataResetSpan(super.text);
     }
     super.text = value;
     _effectiveTextKey = key;
+    _opaqueTextNeedsRefresh = false;
   }
 
   void _commitFallback({
     required String reason,
     LineBreakLayout? nativeLayout,
     TextWrapDiagnostics? diagnostics,
+    bool measureNative = true,
+    List<TextWrapFailure> failures = const [],
   }) {
     _setEffectiveText(_sourceText);
-    final layout = nativeLayout ?? _fallbackLayout();
+    final observedFailures = [...failures];
+    if (failures.isNotEmpty) {
+      _cachedSelection = null;
+      _cachedSelectionKey = null;
+      _cachedEffectiveText = null;
+    }
+    LineBreakLayout? layout = nativeLayout;
+    if (layout == null && measureNative) {
+      try {
+        layout = _fallbackLayout();
+      } catch (error, stackTrace) {
+        // Geometry is optional diagnostics. Do not let a second adapter
+        // measurement failure prevent RenderParagraph from painting source.
+        observedFailures.add(
+          TextWrapFailure(
+            stage: TextWrapFailureStage.nativeMeasurement,
+            reason: _fallbackReason(error),
+            error: error,
+            stackTrace: stackTrace,
+          ),
+        );
+      }
+    }
+    if (layout == null) {
+      // Never publish fabricated geometry or the previous source's result.
+      _lastResult = null;
+      _lastFailures = List.unmodifiable(observedFailures);
+      _cachedPlan = null;
+      _cachedPlanKey = null;
+      _cachedSelection = null;
+      _cachedSelectionKey = null;
+      _cachedEffectiveText = null;
+      _controller?.clearResult(this, failures: _lastFailures);
+      return;
+    }
     _commit(
       TextWrapResult(
         layout: layout,
@@ -665,11 +897,17 @@ class RenderTextAutoWrap extends RenderParagraph {
                 calculationLimit: diagnostics.calculationLimit,
               ),
       ),
+      failures: observedFailures,
     );
   }
 
   LineBreakLayout _fallbackLayout() {
     final source = encodeInlineSpan(_sourceText).text;
+    if (source.length > maxSemanticTextLength) {
+      throw const TextWrapInputLimitException(
+        'Native diagnostics skipped for source exceeding 65536 UTF-16 code units.',
+      );
+    }
     // Semantic placeholder validation is intentionally stricter than Flutter's
     // native path (for example, native layout permits a missing real baseline).
     final placeholders = super.layoutInlineChildren(
@@ -683,7 +921,7 @@ class RenderTextAutoWrap extends RenderParagraph {
         minWidth: constraints.minWidth,
         maxWidth: _maxLayoutWidth(constraints.maxWidth),
       );
-      return _nativeLayout(
+      return measureNativeTextLayout(
         painter,
         source,
         constraints.maxWidth.isFinite ? constraints.maxWidth : painter.width,
@@ -693,13 +931,18 @@ class RenderTextAutoWrap extends RenderParagraph {
     }
   }
 
-  void _commit(TextWrapResult result) {
+  void _commit(
+    TextWrapResult result, {
+    List<TextWrapFailure> failures = const [],
+  }) {
     _lastResult = result;
-    _controller?.commitResult(this, result);
+    _lastFailures = List.unmodifiable(failures);
+    _controller?.commitResult(this, result, failures: _lastFailures);
   }
 }
 
 String _fallbackReason(Object error) => switch (error) {
+  TextWrapInputLimitException() => 'inputLimit',
   _UnmeasurablePlaceholder() => 'unmeasurablePlaceholder',
   UnsupportedSpanTransformationException() => 'unsupportedSpanTransformation',
   TextRangeMeasurementException() => 'invalidRuntimeMeasurement',
@@ -824,6 +1067,17 @@ final class _RendererMeasurementKey {
   );
 }
 
+bool _containsOpaqueSpan(InlineSpan source) {
+  final pending = <InlineSpan>[source];
+  while (pending.isNotEmpty) {
+    final span = pending.removeLast();
+    if (span.runtimeType == WidgetSpan) continue;
+    if (span is! TextSpan || span.runtimeType != TextSpan) return true;
+    pending.addAll(span.children ?? const <InlineSpan>[]);
+  }
+  return false;
+}
+
 /// Full span-tree equality for cache and committed-text decisions.
 ///
 /// Flutter's [TextSpan] equality and [TextSpan.compareTo] intentionally omit
@@ -843,18 +1097,42 @@ final class _InlineSpanCacheKey {
 }
 
 bool _sameInlineSpan(InlineSpan left, InlineSpan right) {
-  if (identical(left, right)) return true;
-  if (left.runtimeType != right.runtimeType || left != right) return false;
-  if (left is! TextSpan || right is! TextSpan) return true;
-  if (left.locale != right.locale || left.spellOut != right.spellOut) {
-    return false;
-  }
-  final leftChildren = left.children ?? const <InlineSpan>[];
-  final rightChildren = right.children ?? const <InlineSpan>[];
-  if (leftChildren.length != rightChildren.length) return false;
-  for (var index = 0; index < leftChildren.length; index++) {
-    if (!_sameInlineSpan(leftChildren[index], rightChildren[index])) {
+  final pending = [(left, right)];
+  while (pending.isNotEmpty) {
+    final (left, right) = pending.removeLast();
+    if (identical(left, right)) continue;
+    if (left.runtimeType != right.runtimeType) return false;
+    if (left is! TextSpan || right is! TextSpan) {
+      if (left != right) return false;
+      continue;
+    }
+    if (left.runtimeType == TextSpan) {
+      // TextSpan equality recursively compares its children. Compare ordinary
+      // nodes once here instead of rescanning every subtree at each ancestor.
+      if (right.style != left.style ||
+          right.text != left.text ||
+          right.recognizer != left.recognizer ||
+          right.semanticsLabel != left.semanticsLabel ||
+          right.semanticsIdentifier != left.semanticsIdentifier ||
+          left.onEnter != right.onEnter ||
+          left.onExit != right.onExit ||
+          left.mouseCursor != right.mouseCursor) {
+        return false;
+      }
+    } else if (left != right) {
+      // Preserve opaque subclasses' own equality contract.
       return false;
+    }
+    if (left.locale != right.locale || left.spellOut != right.spellOut) {
+      return false;
+    }
+    final leftChildren = left.children;
+    final rightChildren = right.children;
+    if ((leftChildren == null) != (rightChildren == null)) return false;
+    if (leftChildren == null || rightChildren == null) continue;
+    if (leftChildren.length != rightChildren.length) return false;
+    for (var index = leftChildren.length - 1; index >= 0; index--) {
+      pending.add((leftChildren[index], rightChildren[index]));
     }
   }
   return true;
@@ -954,35 +1232,15 @@ final class _PlaceholderCacheKey {
   int get hashCode => Object.hashAll(dimensions);
 }
 
-int? _hardBreakStart(String source, int lineStart, int lineEnd) {
-  var offset = lineEnd;
-  if (offset > lineStart && _isNewline(source.codeUnitAt(offset - 1))) {
-    offset--;
-  }
-  if (offset >= source.length || !_isNewline(source.codeUnitAt(offset))) {
-    return null;
-  }
-  if (source.codeUnitAt(offset) == 0x0a &&
-      offset > lineStart &&
-      source.codeUnitAt(offset - 1) == 0x0d) {
-    return offset - 1;
-  }
-  return offset;
+final class _SourceQueryMetrics {
+  const _SourceQueryMetrics(
+    this.minIntrinsicWidth,
+    this.maxIntrinsicWidth,
+    this.size,
+    this.baseline,
+  );
+  final double minIntrinsicWidth;
+  final double maxIntrinsicWidth;
+  final Size size;
+  final double baseline;
 }
-
-int _nextLineStart(String source, int lineEnd) {
-  if (lineEnd >= source.length) return lineEnd;
-  final codeUnit = source.codeUnitAt(lineEnd);
-  if (codeUnit == 0x0d &&
-      lineEnd + 1 < source.length &&
-      source.codeUnitAt(lineEnd + 1) == 0x0a) {
-    return lineEnd + 2;
-  }
-  return _isNewline(codeUnit) ? lineEnd + 1 : lineEnd;
-}
-
-bool _isNewline(int codeUnit) =>
-    codeUnit == 0x0a ||
-    codeUnit == 0x0d ||
-    codeUnit == 0x2028 ||
-    codeUnit == 0x2029;

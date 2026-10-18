@@ -5,7 +5,12 @@
 // adapters for the immutable PhraseModel API.
 library;
 
-export 'src/core/boundaries.dart';
+export 'src/core/boundaries.dart'
+    hide
+        graphemeEndpoints,
+        isBreakableWhitespace,
+        hardBreakPattern,
+        isHardBreak;
 export 'src/core/exceptions.dart';
 export 'src/core/layout.dart';
 export 'src/core/models.dart';
@@ -20,4 +25,4 @@ export 'src/models/language_detection.dart';
 export 'src/flutter/controller.dart';
 export 'src/flutter/text_auto_wrap.dart';
 
-const String textAutoWrapVersion = '0.1.1';
+const String textAutoWrapVersion = '0.1.2';

@@ -21,6 +21,93 @@ void main() {
     });
   });
 
+  for (final glue in [
+    '\u00a0',
+    '\u2007',
+    '\u2011',
+    '\u202f',
+    '\ufeff',
+    '\u2060',
+  ]) {
+    test('nonbreaking ${glue.codeUnitAt(0)} has no soft opportunities', () {
+      expect(allowedBoundaries('a${glue}b', BoundaryMode.spaces), isEmpty);
+      expect(allowedBoundaries('a${glue}b', BoundaryMode.characters), isEmpty);
+      expect(
+        allowedBoundaries(
+          'a $glue'
+          'b c',
+          BoundaryMode.spaces,
+        ),
+        [5],
+      );
+    });
+  }
+
+  for (final rune in [
+    0x034f,
+    0x035c,
+    0x0362,
+    0x0f08,
+    0x0f0c,
+    0x0f12,
+    0x0fd9,
+    0x0fda,
+    0x180e,
+    0x1dcd,
+    0x1dfc,
+    0xfe20,
+    0xfe22,
+    0xfe24,
+    0xfe26,
+    0xfe27,
+    0xfe29,
+    0xfe2b,
+    0xfe2d,
+    0xfe2e,
+    0x1107f,
+    0x13430,
+    0x13436,
+    0x13439,
+    0x1343b,
+    0x16fe4,
+  ]) {
+    test(
+      'Unicode16 glue U+${rune.toRadixString(16)} blocks neighboring breaks',
+      () {
+        final glue = String.fromCharCode(rune);
+        expect(
+          allowedBoundaries('a${glue}b', BoundaryMode.characters),
+          isEmpty,
+        );
+        expect(
+          allowedBoundaries(
+            'a $glue'
+            'b c',
+            BoundaryMode.spaces,
+          ),
+          [glue.length + 4],
+        );
+      },
+    );
+  }
+
+  test('nonbreaking bases retain glue across combining marks', () {
+    expect(
+      allowedBoundaries('a\u00a0\u0301b', BoundaryMode.characters),
+      isEmpty,
+    );
+    expect(allowedBoundaries('a \u00a0\u0301b c', BoundaryMode.spaces), [6]);
+  });
+
+  test(
+    'grapheme offsets preserve isolated surrogates and zero width controls',
+    () {
+      final text = String.fromCharCodes([0x61, 0xd800, 0x200b, 0xdc00, 0x62]);
+      expect(allowedBoundaries(text, BoundaryMode.characters), [1, 2, 3, 4]);
+      expect(allowedBoundaries(text, BoundaryMode.spaces), isEmpty);
+    },
+  );
+
   group('validateOffsets', () {
     test('rejects duplicate offsets', () {
       expect(

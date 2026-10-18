@@ -12,6 +12,10 @@ import 'prediction.dart';
 /// monotonic; shaping, styles, and placeholders may affect each range.
 typedef TextRangeMeasurer = double Function(int start, int end);
 
+/// Maximum UTF-16 input length for semantic prediction and calculation.
+/// Semantic entry points reject larger inputs; widgets retain native rendering.
+const int maxSemanticTextLength = 65536;
+
 const int _maxCandidateCount = 4096;
 const int _maxStateCount = 16384;
 
@@ -86,11 +90,7 @@ final class LineBreakLayout {
         'A layout needs at least one line and a width for each line.',
       );
     }
-    final boundaries = {
-      0,
-      sourceText.length,
-      ...allowedBoundaries(sourceText, BoundaryMode.characters),
-    };
+    final boundaries = graphemeEndpoints(sourceText);
     var previousEnd = 0;
     for (final range in ranges) {
       if (range.start < previousEnd ||
@@ -134,7 +134,10 @@ final class LineBreakLayout {
        lineCount = ranges.length,
        maxLineWidth = widths.fold(0, math.max),
        imbalance = _imbalance(widths),
-       totalModelCost = selectedCandidates.fold(0, (sum, c) => sum + c.penalty),
+       totalModelCost = selectedCandidates.fold(
+         0,
+         (sum, c) => _addModelCost(sum, c.penalty),
+       ),
        overflow = widths.any((width) => width > maxWidth);
 
   final String sourceText;
@@ -234,6 +237,11 @@ final class _Calculator implements LayoutCalculator {
     LineBreakLayout? baseline,
   }) {
     _validateWidth(maxWidth);
+    if (text.length > maxSemanticTextLength) {
+      throw const TextWrapInputLimitException(
+        'Semantic input exceeds 65536 UTF-16 code units.',
+      );
+    }
     _validateCandidates(text, candidates);
     if (candidates.length > _maxCandidateCount) {
       return LayoutCalculationLimit(
@@ -274,12 +282,21 @@ final class _Calculator implements LayoutCalculator {
               ]
             : _optimal(paragraph, states, measurements, budget, maxWidth);
       }
-      final layouts = [
-        for (final state in states) _layout(text, state, maxWidth, budget),
-      ];
-      return LayoutCalculationSuccess(
-        mode == _Mode.optimal ? _pareto(layouts) : layouts,
-      );
+      if (mode == _Mode.optimal) {
+        // Charge all final paths, including those scalar dominance discards,
+        // before Pareto work. Materialization below must not charge them again.
+        for (final state in states) {
+          for (var line = 0; line < state.lineCount; line++) {
+            budget.take();
+          }
+        }
+        // Remove dominated overflowing costs before creating public layouts.
+        states = _pareto(states);
+      }
+      return LayoutCalculationSuccess([
+        for (final state in states)
+          _layout(text, state, maxWidth, mode == _Mode.optimal ? null : budget),
+      ]);
     } on _LimitReached {
       return const LayoutCalculationLimit(
         kind: LayoutCalculationLimitKind.states,
@@ -320,9 +337,11 @@ final class _Calculator implements LayoutCalculator {
           continue;
         }
         final options = <BreakCandidate>[];
+        final distance = math.min(radius, paragraph.boundaries.length - 1);
         for (
-          var neighbor = math.max(0, index - radius);
-          neighbor <= math.min(paragraph.boundaries.length - 1, index + radius);
+          var neighbor = math.max(0, index - distance);
+          neighbor <=
+              math.min(paragraph.boundaries.length - 1, index + distance);
           neighbor++
         ) {
           budget.take();
@@ -492,17 +511,17 @@ void _retain(List<_State> frontier, _State state) {
   frontier.add(state);
 }
 
-List<LineBreakLayout> _pareto(List<LineBreakLayout> layouts) {
-  final result = <LineBreakLayout>[];
-  for (final layout in layouts) {
-    bool dominates(LineBreakLayout a, LineBreakLayout b) =>
-        a.totalModelCost <= b.totalModelCost && a.imbalance <= b.imbalance;
-    if (result.any((other) => dominates(other, layout))) continue;
-    result.removeWhere((other) => dominates(layout, other));
-    result.add(layout);
+List<_State> _pareto(List<_State> states) {
+  final result = <_State>[];
+  for (final state in states) {
+    bool dominates(_State a, _State b) =>
+        a.cost <= b.cost && a.imbalance <= b.imbalance;
+    if (result.any((other) => dominates(other, state))) continue;
+    result.removeWhere((other) => dominates(state, other));
+    result.add(state);
   }
   result.sort((a, b) {
-    final cost = a.totalModelCost.compareTo(b.totalModelCost);
+    final cost = a.cost.compareTo(b.cost);
     return cost != 0 ? cost : a.imbalance.compareTo(b.imbalance);
   });
   return result;
@@ -512,13 +531,13 @@ LineBreakLayout _layout(
   String text,
   _State state,
   double maxWidth,
-  _Budget budget,
+  _Budget? budget,
 ) {
   final ranges = <TextLineRange>[];
   final widths = <double>[];
   final selected = <BreakCandidate>[];
   for (var cursor = state; cursor.previous != null; cursor = cursor.previous!) {
-    budget.take();
+    budget?.take();
     ranges.add(cursor.range!);
     widths.add(cursor.width);
     if (cursor.candidate != null) selected.add(cursor.candidate!);
@@ -565,6 +584,8 @@ final class _State {
   final double cost;
   final double minimum;
   final double maximum;
+
+  double get imbalance => maximum == 0 ? 0 : (maximum - minimum) / maximum;
 }
 
 final class _Boundary {
@@ -604,8 +625,7 @@ Iterable<_Paragraph> _paragraphs(
 ) sync* {
   var start = 0;
   var candidateIndex = 0;
-  final newline = RegExp(r'\r\n|[\r\n\u2028\u2029]');
-  final matches = newline.allMatches(text).iterator;
+  final matches = hardBreakPattern.allMatches(text).iterator;
   while (true) {
     final match = matches.moveNext() ? matches.current : null;
     final end = match?.start ?? text.length;
@@ -633,7 +653,7 @@ List<_Boundary> _boundaries(
   int? runStart;
   var offset = start;
   for (final grapheme in text.substring(start, end).characters) {
-    if (grapheme.trim().isEmpty) {
+    if (isBreakableWhitespace(grapheme)) {
       runStart ??= offset;
     } else if (runStart != null) {
       whitespaceRuns.add((runStart, offset));
@@ -716,6 +736,16 @@ void _validateCandidates(String text, List<BreakCandidate> candidates) {
       );
     }
   }
+}
+
+double _addModelCost(double accumulated, double penalty) {
+  final cost = accumulated + penalty;
+  if (!cost.isFinite) {
+    throw const InvalidModelConfigurationException(
+      'The total model cost must remain finite.',
+    );
+  }
+  return cost;
 }
 
 double _imbalance(List<double> widths) {

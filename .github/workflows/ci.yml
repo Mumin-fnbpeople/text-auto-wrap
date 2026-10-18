@@ -25,13 +25,17 @@ jobs:
         run: flutter analyze
       - name: Run tests with coverage
         run: flutter test --coverage
+      - name: Run Chrome tests
+        run: flutter test --platform chrome
+      - name: Run Wasm tests
+        run: flutter test --platform chrome --wasm
       - name: Build example for web
         working-directory: example
         run: flutter build web
       - name: Install pana
         run: dart pub global activate pana
       - name: Score package
-        run: pana --no-warning
+        run: pana --exit-code-threshold 0
       - name: Validate package archive
         run: flutter pub publish --dry-run
 
@@ -48,6 +52,9 @@ jobs:
           - name: Windows / Flutter 3.47.4
             os: windows-latest
             flutter: 3.47.4
+          - name: Linux / Flutter 3.47.3 with Chrome
+            os: ubuntu-latest
+            flutter: 3.47.3
           - name: Linux / minimum Flutter 3.38.1
             os: ubuntu-latest
             flutter: 3.38.1
@@ -64,3 +71,6 @@ jobs:
         run: flutter pub get
       - name: Run tests
         run: flutter test
+      - name: Run app SDK Chrome tests
+        if: matrix.flutter == '3.47.3'
+        run: flutter test --platform chrome

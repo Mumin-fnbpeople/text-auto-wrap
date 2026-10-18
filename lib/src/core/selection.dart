@@ -51,6 +51,7 @@ abstract interface class LayoutSelector {
 ///
 /// Among minimum-line layouts, first retain those within [tolerance] of the
 /// best imbalance, then prefer model cost, balance, native, and break order.
+/// Cost and balance ties use an absolute epsilon of 1e-9 from each minimum.
 /// Adapted from semantic-wrap's selectors.ts at the revision in NOTICE.
 final class BalanceStrategy implements LayoutSelector {
   const BalanceStrategy({this.tolerance = .12});
@@ -129,11 +130,21 @@ final class BalanceStrategy implements LayoutSelector {
     eligible = eligible
         .where((entry) => entry.layout.imbalance <= best + tolerance + _epsilon)
         .toList();
+    // Anchor approximate ties to a common minimum. Pairwise epsilon
+    // comparisons are not transitive and can make sorting depend on input order.
+    final minimumCost = eligible
+        .map((entry) => entry.layout.totalModelCost)
+        .reduce(math.min);
+    eligible = eligible
+        .where((entry) => entry.layout.totalModelCost <= minimumCost + _epsilon)
+        .toList();
+    final minimumImbalance = eligible
+        .map((entry) => entry.layout.imbalance)
+        .reduce(math.min);
+    eligible = eligible
+        .where((entry) => entry.layout.imbalance <= minimumImbalance + _epsilon)
+        .toList();
     eligible.sort((left, right) {
-      final cost = left.layout.totalModelCost - right.layout.totalModelCost;
-      if (cost.abs() > _epsilon) return cost.sign.toInt();
-      final balance = left.layout.imbalance - right.layout.imbalance;
-      if (balance.abs() > _epsilon) return balance.sign.toInt();
       if (left.decision.source != right.decision.source) {
         return left.decision.source == TextWrapSelectionSource.native ? -1 : 1;
       }

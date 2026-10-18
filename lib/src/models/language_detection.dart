@@ -280,7 +280,8 @@ final class _SpaceBoundaryPredictor implements BoundaryPredictor {
     final result = <int>[];
     for (final end in allowedBoundaries(text, BoundaryMode.spaces)) {
       var start = end;
-      while (start > 0 && text.substring(start - 1, start).trim().isEmpty) {
+      while (start > 0 &&
+          isBreakableWhitespace(text.substring(start - 1, start))) {
         start--;
       }
       if (start > 0 && predicted.contains(start)) result.add(end);

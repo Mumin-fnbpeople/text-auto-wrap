@@ -12,7 +12,7 @@ Flutter의 일반 텍스트와 리치 텍스트에 모델 기반 의미 단위 �
 
 ```yaml
 dependencies:
-  text_auto_wrap: ^0.1.1
+  text_auto_wrap: ^0.1.2
 ```
 
 ```dart
@@ -189,13 +189,19 @@ controller.dispose();
 
 Reason은 사용자에게 보여 주는 번역 문자열이 아니라 진단값으로 다루세요. 커스텀 selector는 앱 전용 reason을 반환할 수 있습니다.
 
-Fallback 결과에는 실제로 측정한 Flutter 기본 레이아웃의 범위와 너비가 들어 있습니다. 잘못된 span 또는 child metadata 때문에 Flutter 기본 문단도 배치할 수 없다면 기본 레이아웃 오류가 전파되며 새 결과를 기록하지 않습니다.
+Fallback 결과에는 유효성이 확인된 Flutter 기본 범위·너비가 들어 있습니다. 이미 실패한 native 진단 측정은 같은 layout에서 반복하지 않습니다. 기본 geometry를 안전하게 표현할 수 없으면 `controller.result`를 `null`로 비우고 원본 span을 Flutter 문단에 그대로 전달합니다. `controller.failures`에서 실패 단계·reason·예외·스택을 확인할 수 있으며, 다음 layout 성공 시 실패 기록이 지워집니다. Listener 알림은 프레임 끝에 전달합니다. `null` 결과를 빈 문자열이나 너비 0으로 해석하지 마세요. Flutter 기본 렌더링 자체가 실패하면 그 오류는 그대로 전파됩니다.
 
 ## Unicode, 성능, 접근성
 
-모든 offset은 Dart `String`, Flutter `TextPosition`, `TextRange`와 같은 UTF-16 기준입니다. 후보는 Unicode grapheme 경계로 검증하므로 surrogate pair, 결합 sequence, emoji modifier, ZWJ sequence, U+FFFC placeholder token 내부를 나누지 않습니다. 기존 CR, LF, CRLF, U+2028, U+2029 문단 구분자는 보존됩니다.
+Unicode 16.0 `Line_Break=GL/WJ` 속성의 줄바꿈 방지 문자는 원시 Grapheme 경계와 별도로 보호합니다. NBSP, Word Joiner, BOM 등을 일반 공백으로 자르거나 제거하지 않으며 원문을 정규화하지 않습니다. 이는 UAX #14 전체 구현은 아닙니다. Soft Hyphen·Bidi·개행의 최종 표시는 Flutter가 담당하고, 계산 결과가 실제 표시와 다르면 원문 기본 렌더링을 유지합니다.
+
+음수 자간에서는 UTF-16 범위가 정상이어도 Flutter의 glyph advance가 음수가 될 수 있습니다. Adapter는 이 유한한 음수 advance를 차지하는 너비 0으로 표현합니다. 유한하지 않은 측정값·잘못된 범위·사용자 `measureRange`가 반환한 음수는 계속 오류로 처리합니다. SDK별 제한과 재현 가능한 검증은 [Unicode 안정성](doc/unicode-stability.md)을 참고하세요.
+
+모든 offset은 Dart `String`, Flutter `TextPosition`, `TextRange`와 같은 UTF-16 기준입니다. 후보는 Unicode grapheme 경계로 검증하므로 surrogate pair, 결합 sequence, emoji modifier, ZWJ sequence, U+FFFC placeholder token 내부를 나누지 않습니다. 기존 CR, LF, CRLF, VT, FF, NEL, U+2028, U+2029 문단 구분자는 보존됩니다. 해당 문자의 엔진 표시가 계산과 다르면 원문 native 표시를 유지합니다.
 
 동기식 exact-first layout 작업량은 제한됩니다. 0.1.0은 후보가 4,096개를 초과하거나 optimizer state 작업이 16,384회에 도달하면 전체를 fallback하며 일부 계산 결과를 노출하지 않습니다. 재사용 plan은 현재 non-null cache key에 대해 측정 범위를 최대 65,536개 유지합니다. Renderer cache key에는 텍스트/span metadata, effective style, 너비, 방향, locale, scaler, strut, 줄 제한, strategy/model, placeholder 크기가 포함됩니다. 이 상한은 결정론적 안전장치이지 latency 보장이 아니며 공개 조정 옵션도 아닙니다. 대표 콘텐츠와 글꼴로 대상 기기에서 benchmark하세요.
+
+측정 입력이 같으면 검증된 문단을 재사용하므로, 부모가 최소 높이만 바꾸는 반복 배치에서도 문단을 다시 구성하지 않습니다. Intrinsic/Dry 조회는 원문을 기준으로 유지합니다. 커스텀 span이 인스턴스 교체 없이 내부 상태를 바꾸면 renderer에 `markNeedsLayout()`을 호출해야 하며, 이때 사전 측정과 실제 그리기 geometry를 함께 갱신합니다. Renderer benchmark에는 반복 Intrinsic 행, 표, 이미지 선택지 그리드, RichText 목록, 1.5배 인라인 위젯, 세 번 배치하는 부모가 포함됩니다.
 
 추가 break를 넣을 때 중첩 `TextSpan` metadata, recognizer, mouse cursor, locale, spell-out metadata, semantics label/identifier, `WidgetSpan` child identity와 alignment를 보존합니다. 선택 기능은 Flutter selection registrar와 계속 연동됩니다. `semanticsLabel`은 `Text`와 같은 override 역할입니다. 안전한 변환 또는 placeholder 측정이 불가능하면 원본 span tree의 기본 줄바꿈을 유지합니다. 지원할 각 앱 환경에서 screen reader, text scaling, selection, bidi 콘텐츠, interactive span을 테스트하세요.
 
@@ -209,3 +215,7 @@ flutter run -d chrome
 ```
 
 이 프로젝트는 Apache-2.0 라이선스입니다. [`semantic-wrap`](https://github.com/woohyun-park/semantic-wrap)의 commit `54ed67688aa5292f14970cae10bbabd9a11f1b5d`를 수정하여 Dart/Flutter로 포팅했으며, BudouX 호환 inference 구현과 실험적 영어·한국어 weight를 포함합니다. 정확한 저작자 표시와 제한 사항은 [NOTICE](NOTICE), [LICENSE](LICENSE), 모델 카드를 확인하세요.
+
+의미 단위 처리는 UTF-16 65,536 단위, Span occurrence 16,384개, root를 0으로 세는 깊이 1,024까지 제한합니다. 제한을 넘으면 모델·후보 탐색을 생략하고 원문을 Flutter에 전달합니다. Widget 경로에서는 중복 진단 shaping도 생략하므로 `controller.result`가 `null`일 수 있고 `failures`에 `TextWrapInputLimitException`이 기록됩니다. Core `calculate()`·`predict()`·`aggregate()`는 입력 길이 초과 시 독립적인 `TextWrapInputLimitException`을 던집니다. `select()`는 유효한 native layout을 받았다면 `inputLimit` 이유로 재사용하고 calculation-limit 기록은 남기지 않으며, native layout이 없으면 같은 예외를 던집니다. 기존 계산 상한 enum과 invalid-input 예외의 exhaustive switch는 유지됩니다. Flutter 자체가 원문을 표시하는 비용은 이 제한으로 제거되지 않습니다.
+
+ZWJ 바로 뒤, 숫자 묶음 내부와 주요 괄호의 안쪽에는 의미 단위 개행을 추가하지 않습니다. GL/WJ 양옆 보호는 일반 공백 앞 예외까지 허용하는 Unicode 기본 규칙보다 보수적입니다. 전체 UAX #14 준수를 보장하지 않습니다. Controller를 공유하면 가장 최근 commit이 최종 결과가 되므로 독립적인 관측에는 위젯별 Controller를 사용하세요.

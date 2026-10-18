@@ -12,7 +12,7 @@ This is semantic wrapping, not Python-style fixed-column wrapping. Width is base
 
 ```yaml
 dependencies:
-  text_auto_wrap: ^0.1.1
+  text_auto_wrap: ^0.1.2
 ```
 
 ```dart
@@ -189,13 +189,19 @@ For widget results, `ranges`, `lines`, and `widths` describe the final painted l
 
 Applications should treat reasons as diagnostics, not as user-facing localized messages. A custom selector may return its own application-specific reason.
 
-Fallback results contain measured native ranges and widths. If invalid span or child metadata also prevents Flutter's native paragraph layout, the native error propagates and no new result is committed.
+Fallback results contain validated native ranges and widths when available. A failed native diagnostic measurement is not retried in the same layout. If native geometry cannot be represented safely, `controller.result` is cleared to `null`, the original span still goes to Flutter's paragraph, and `controller.failures` exposes the stage, reason, exception, and stack trace. Failures clear after a successful layout; listener notifications remain frame-deferred. Do not interpret a null result as a zero-width or empty source layout. If Flutter's own paragraph cannot render the source, its native error still propagates.
 
 ## Unicode, performance, and accessibility
 
-All offsets are UTF-16 offsets, matching Dart `String`, Flutter `TextPosition`, and `TextRange`. Candidate validation uses Unicode grapheme boundaries, so breaks do not split surrogate pairs, combining sequences, emoji modifiers, ZWJ sequences, or the U+FFFC placeholder token. Existing CR, LF, CRLF, U+2028, and U+2029 paragraph separators are preserved.
+All offsets are UTF-16 offsets, matching Dart `String`, Flutter `TextPosition`, and `TextRange`. Candidate validation uses Unicode grapheme boundaries, so breaks do not split surrogate pairs, combining sequences, emoji modifiers, ZWJ sequences, or the U+FFFC placeholder token. Existing CR, LF, CRLF, VT, FF, NEL, U+2028, and U+2029 paragraph separators are preserved; engine differences retain native source rendering.
+
+Soft opportunities protect Unicode 16.0 `Line_Break=GL/WJ` glue, including nonbreaking spaces, word joiners, and BOM, independently of raw grapheme endpoints. These characters are never removed or normalized. This is not a complete UAX #14 implementation. Flutter controls the final rendering of soft hyphens, bidi text, and hard separators; if calculated geometry disagrees with native paint, the adapter retains the source.
+
+Negative letter spacing can produce a finite negative native glyph advance even when UTF-16 ranges are valid. The Flutter adapter represents that advance as zero occupied width. Non-finite measurements, invalid ranges, and negative widths from custom `measureRange` callbacks remain errors. For engine limitations, SDK verification, and reproducible Unicode tests, see [Unicode stability](doc/unicode-stability.md).
 
 Synchronous exact-first layout is bounded. Version 0.1.0 falls back atomically at more than 4,096 candidates or after 16,384 optimizer states; no partial calculated layout is exposed. A reusable plan retains at most 65,536 measured ranges for its current non-null cache key. Renderer caches are keyed by text/span metadata, effective style, width, direction, locale, scaler, strut, line constraints, strategy/model, and placeholder dimensions. These ceilings are deterministic safeguards, not latency guarantees, and are not public tuning parameters. Benchmark on target devices with representative fonts and content.
+
+Repeated layouts with unchanged measurement inputs reuse the verified paragraph, including when a parent changes only its minimum height. Intrinsic and dry queries continue to measure the original source. Custom spans that change without replacing their identity must mark their renderer as needing layout; this refreshes both speculative measurements and native paint geometry. The renderer benchmark includes repeated intrinsic rows, tables, image-choice grids, rich lists, 1.5× inline widgets, and three-pass parents.
 
 Inserted breaks preserve nested `TextSpan` metadata, recognizers, mouse cursors, locale, spell-out metadata, semantics labels/identifiers, and `WidgetSpan` child identity and alignment. Selection remains integrated with Flutter's selection registrar. `semanticsLabel` has the same override role as on `Text`. If safe transformation or placeholder measurement is not possible, native wrapping keeps the original span tree. Test screen-reader output, text scaling, selection, bidi content, and interactive spans in every supported target application.
 
@@ -209,3 +215,7 @@ flutter run -d chrome
 ```
 
 This project is licensed under Apache-2.0. It is a modified Dart/Flutter port of [`semantic-wrap`](https://github.com/woohyun-park/semantic-wrap) at commit `54ed67688aa5292f14970cae10bbabd9a11f1b5d`, including a BudouX-compatible inference implementation and the experimental English/Korean weights. See [NOTICE](https://github.com/muminjun/text-auto-wrap/blob/main/NOTICE), [LICENSE](https://github.com/muminjun/text-auto-wrap/blob/main/LICENSE), and the model cards for exact attribution and limitations.
+
+Semantic work is limited to 65,536 UTF-16 units, 16,384 span occurrences, and depth 1,024 (root depth zero). Larger inputs bypass prediction and candidate work. Widgets also skip duplicate diagnostic shaping, keep native source rendering, and may publish `controller.result == null` with `TextWrapInputLimitException` in `failures`. Core `calculate()`, `predict()`, and `aggregate()` throw the independent `TextWrapInputLimitException` for oversized text. `select()` reuses a supplied valid native layout with reason `inputLimit` and no calculation-limit record, or throws that exception if no native layout is supplied. Existing exhaustive switches over calculation-limit kinds and invalid-input exceptions remain valid. Native Flutter rendering still has its own input-dependent cost.
+
+Soft opportunities protect boundaries immediately following ZWJ, grouped numbers, and the inner sides of common brackets. GL/WJ protection remains deliberately more conservative than Unicode's space-before-glue exceptions. This is not full UAX #14 conformance. Shared controllers expose the last committed snapshot; use one controller per widget for independent observation.

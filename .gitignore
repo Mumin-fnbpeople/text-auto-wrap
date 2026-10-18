@@ -20,3 +20,6 @@ example/ios/.symlinks/
 example/macos/Flutter/ephemeral/
 example/linux/flutter/ephemeral/
 example/windows/flutter/ephemeral/
+
+# macOS metadata.
+.DS_Store

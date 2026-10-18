@@ -33,7 +33,7 @@ final class BudouxPredictor implements BoundaryPredictor {
   /// Validates and snapshots a map of string groups to string/numeric weights.
   ///
   /// Empty and unknown groups retain upstream semantics. Malformed maps and
-  /// non-finite weights throw [InvalidModelConfigurationException].
+  /// non-finite weights or aggregates throw [InvalidModelConfigurationException].
   factory BudouxPredictor(Object? weights) {
     if (weights is! Map) {
       throw const InvalidModelConfigurationException(
@@ -63,6 +63,11 @@ final class BudouxPredictor implements BoundaryPredictor {
         sum += weight;
       }
       model[group] = Map.unmodifiable(features);
+    }
+    if (!sum.isFinite) {
+      throw const InvalidModelConfigurationException(
+        'The aggregate BudouX weight must be finite.',
+      );
     }
     return BudouxPredictor._(Map.unmodifiable(model), -0.5 * sum);
   }
@@ -97,6 +102,11 @@ final class BudouxPredictor implements BoundaryPredictor {
       total += score('TW2', offset - 2, offset + 1);
       total += score('TW3', offset - 1, offset + 2);
       total += score('TW4', offset, offset + 3);
+      if (!total.isFinite) {
+        throw const InvalidModelConfigurationException(
+          'BudouX feature scores must remain finite.',
+        );
+      }
       if (total > 0) result.add(offset);
     }
     return List.unmodifiable(result);

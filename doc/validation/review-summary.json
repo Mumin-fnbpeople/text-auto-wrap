@@ -1,0 +1,52 @@
+{
+  "productionSha256": "c218467bd343f223a69392f8f51b979c163174a930acf7a4b3af9078bc17268f",
+  "results": {
+    "Flutter 3.47.4 VM": {
+      "passed": 827,
+      "skipped": 0,
+      "failures": 0,
+      "log": "/tmp/taw-review-final3-vm.log"
+    },
+    "Flutter 3.47.4 Chrome CanvasKit": {
+      "passed": 827,
+      "skipped": 0,
+      "failures": 0,
+      "log": "/tmp/taw-review-final3-chrome.log"
+    },
+    "Flutter 3.47.4 Chrome Wasm": {
+      "passed": 827,
+      "skipped": 0,
+      "failures": 0,
+      "log": "/tmp/taw-review-final3-wasm.log"
+    },
+    "Flutter 3.47.3 VM": {
+      "passed": 827,
+      "skipped": 0,
+      "failures": 0,
+      "log": "/tmp/taw-review-final2-sdk3473-vm.log"
+    },
+    "Flutter 3.47.3 Chrome CanvasKit": {
+      "passed": 827,
+      "skipped": 0,
+      "failures": 0,
+      "log": "/tmp/taw-review-sdk3473-complete4-chrome.log"
+    },
+    "Flutter 3.38.1 VM": {
+      "passed": 821,
+      "skipped": 6,
+      "failures": 0,
+      "log": "/tmp/taw-review-final3-sdk3381-vm.log"
+    },
+    "Actual font opt-in Chrome fixtures": {
+      "passed": 2,
+      "skipped": 0,
+      "failures": 0,
+      "log": "/tmp/taw-review-realfont-complete.log"
+    }
+  },
+  "limitations": [
+    "No physical mobile device or manual screen-reader verification",
+    "No full fnb-app-v2 screen verification",
+    "Targeted line-break policy, not complete UAX #14 conformance"
+  ]
+}
