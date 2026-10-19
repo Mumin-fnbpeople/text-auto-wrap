@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import '../benchmark/app_phrase_benchmark_support.dart' as benchmark;
+import 'support/app_phrase_benchmark_support.dart' as benchmark;
 
 void main() {
   var lines = <String>[];

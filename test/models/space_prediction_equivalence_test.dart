@@ -4,7 +4,7 @@ import 'package:text_auto_wrap/src/models/english_model.dart';
 import 'package:text_auto_wrap/src/models/korean_model.dart';
 import 'package:text_auto_wrap/text_auto_wrap.dart';
 
-import '../../benchmark/app_phrase_samples.dart';
+import '../support/app_phrase_samples.dart';
 
 void main() {
   test('space-only scoring matches full BudouX inference and projection', () {

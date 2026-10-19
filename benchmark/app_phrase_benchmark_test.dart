@@ -16,8 +16,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:text_auto_wrap/text_auto_wrap.dart';
 import 'package:text_auto_wrap/src/flutter/render_text_auto_wrap.dart';
 
-import 'app_phrase_samples.dart';
-import 'app_phrase_benchmark_support.dart';
+import '../test/support/app_phrase_samples.dart';
+import '../test/support/app_phrase_benchmark_support.dart';
 
 const _enabled = bool.fromEnvironment('TAW_BENCH');
 const _scales = [1.0, 1.3, 1.5, 2.0];

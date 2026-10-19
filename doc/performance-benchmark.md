@@ -37,7 +37,8 @@ tree. Every completed calculation must equal the reference's unbounded layout;
 a remaining limited calculation must equal its bounded native fallback. Assertions
 also compare cold, recreated, and A→B→A layouts within each condition.
 
-For 0.1.2, copy the harness, `app_phrase_benchmark_support.dart`, and samples into an isolated temporary package and add
+For 0.1.2, copy the harness and the two `test/support/app_phrase_*.dart` helpers (keeping
+their relative paths) into an isolated temporary package and add
 only a no-op `static void clearSharedCaches() {}` to `RenderTextAutoWrap`; that
 release has no shared caches. This is harness instrumentation, not a layout
 change. Use the same Flutter SDK, font, arguments, and machine for all versions.

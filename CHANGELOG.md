@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 - Unreleased
+## 0.1.3 - 2026-10-19
 
 - Reuse bounded shared selections and plans for equivalent plain text trees, and retain range widths across width changes. Interactive, widget, and custom spans stay renderer-local; system-font or platform-locale changes invalidate shared entries.
 - Skip bundled-model prediction/calculation for an already fitting single native line under `BalanceStrategy` with a built-in calculator. Caller-supplied predictors, aggregators, and calculators continue through validation.
